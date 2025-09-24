@@ -1,3 +1,35 @@
+"""
+Core graph building environment for GFlowNet trajectory generation.
+
+This module defines the fundamental graph building environment that serves as the
+foundation for all graph-based GFlowNet tasks. It provides a generic framework
+for constructing graphs node-by-node and edge-by-edge, with support for various
+action types and state representations.
+
+Key components:
+- Graph: Enhanced NetworkX graph with caching and utility methods
+- GraphAction: Actions that can be taken to modify graphs (add node, add edge, stop)
+- GraphBuildingEnv: Environment that manages state transitions and action validity
+- GraphBuildingEnvContext: Context for converting graphs to neural network inputs
+
+The environment supports:
+- Node addition with attributes (atom types, features, etc.)
+- Edge addition with attributes (bond types, weights, etc.)
+- Action masking to ensure only valid actions are taken
+- Deterministic state transitions with caching for efficiency
+- Conversion to PyTorch Geometric Data objects for neural networks
+
+This abstraction allows the same GFlowNet algorithms to work across different
+domains (molecular generation, protein design, etc.) by implementing domain-specific
+contexts while reusing the core graph building mechanics.
+
+The environment follows the standard GFlowNet paradigm:
+- States are partially constructed graphs
+- Actions extend the graph (add nodes/edges) or terminate construction
+- Rewards are computed on terminal states (complete graphs)
+- Trajectories represent the full construction process
+"""
+
 import copy
 import enum
 import json
@@ -15,35 +47,136 @@ from torch_scatter import scatter, scatter_max
 
 
 class Graph(nx.Graph):
+    """
+    Enhanced NetworkX Graph with GFlowNet-specific functionality.
+    
+    This class extends NetworkX Graph to add caching capabilities and utility
+    methods needed for efficient GFlowNet training. The caching helps avoid
+    recomputing expensive graph-to-tensor conversions during training.
+    
+    Additional features:
+    - Improved string representation showing nodes, edges, and attributes
+    - Bridge detection for structural analysis
+    - Node relabeling utilities
+    - Cache management for Data object conversions
+    """
+    
     def __str__(self):
+        """String representation delegated to __repr__ for consistency."""
         return repr(self)
 
     def __repr__(self):
+        """
+        Detailed string representation showing graph structure and node attributes.
+        
+        Returns a string showing:
+        - List of node IDs
+        - List of edges
+        - List of node 'v' attributes (typically representing node types)
+        """
         return f'<{list(self.nodes)}, {list(self.edges)}, {list(self.nodes[i]["v"] for i in self.nodes)}>'
 
     def bridges(self):
+        """
+        Find bridge edges in the graph.
+        
+        Bridge edges are edges whose removal increases the number of connected
+        components. These are structurally important edges.
+        
+        Returns
+        -------
+        List[Tuple[int, int]]
+            List of bridge edges as (node1, node2) tuples
+        """
         return list(nx.bridges(self))
 
     def relabel_nodes(self, rmap):
+        """
+        Relabel graph nodes according to a mapping.
+        
+        Parameters
+        ----------
+        rmap : dict
+            Mapping from old node labels to new node labels
+            
+        Returns
+        -------
+        Graph
+            New graph with relabeled nodes
+        """
         return nx.relabel_nodes(self, rmap)
 
     def clear_cache(self):
+        """
+        Clear cached Data object conversions.
+        
+        This should be called when the graph is modified to ensure
+        that subsequent conversions to PyTorch Geometric Data objects
+        reflect the current graph state.
+        """
         self._Data_cache = None
 
 
 def graph_without_edge(g, e):
+    """
+    Create a copy of the graph with a specific edge removed.
+    
+    Parameters
+    ----------
+    g : Graph
+        Input graph
+    e : tuple
+        Edge to remove as (node1, node2)
+        
+    Returns
+    -------
+    Graph
+        Copy of graph with the specified edge removed
+    """
     gp = g.copy()
     gp.remove_edge(*e)
     return gp
 
 
 def graph_without_node(g, n):
+    """
+    Create a copy of the graph with a specific node removed.
+    
+    Parameters
+    ----------
+    g : Graph
+        Input graph
+    n : int
+        Node ID to remove
+        
+    Returns
+    -------
+    Graph
+        Copy of graph with the specified node (and its edges) removed
+    """
     gp = g.copy()
     gp.remove_node(n)
     return gp
 
 
 def graph_without_node_attr(g, n, a):
+    """
+    Create a copy of the graph with a specific node attribute removed.
+    
+    Parameters
+    ----------
+    g : Graph
+        Input graph
+    n : int
+        Node ID whose attribute to remove
+    a : str
+        Attribute name to remove
+        
+    Returns
+    -------
+    Graph
+        Copy of graph with the specified node attribute removed
+    """
     gp = g.copy()
     del gp.nodes[n][a]
     return gp

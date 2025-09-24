@@ -1,3 +1,33 @@
+"""
+Multi-objective fragment-based molecule generation targeting sEH protein.
+
+This task extends the basic sEH fragment task to include multi-objective optimization,
+balancing drug-likeness properties alongside the primary sEH binding objective.
+It demonstrates how GFlowNets can handle multiple competing objectives in drug discovery.
+
+Objectives optimized:
+1. sEH binding affinity (primary pharmacological target)
+2. QED (Quantitative Estimate of Drug-likeness) 
+3. Synthetic Accessibility Score (ease of synthesis)
+4. Molecular Weight (size constraints for drug-likeness)
+
+Key features:
+- Multi-objective reward computation with weighted preferences
+- Pareto frontier analysis and hypervolume computation
+- Focus region conditioning for targeted exploration
+- Comprehensive molecular property evaluation
+- Integration with envelope Q-learning and REINFORCE baselines
+
+The task showcases how GFlowNets can generate diverse molecules that balance
+multiple drug discovery criteria, providing chemists with a range of viable
+candidates that consider not just binding affinity but also synthesizability
+and drug-like properties.
+
+This implementation serves as a realistic example of multi-objective optimization
+in drug discovery, where trade-offs between objectives are common and important
+for practical application.
+"""
+
 import pathlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -26,6 +56,27 @@ from gflownet.utils.transforms import to_logreward
 
 
 def safe(f, x, default):
+    """
+    Safely apply a function with a default return value on exception.
+    
+    This utility handles cases where molecular property calculations might fail
+    due to invalid molecules or computational errors. It provides robust
+    error handling for molecular descriptor calculations.
+    
+    Parameters
+    ----------
+    f : callable
+        Function to apply (e.g., molecular descriptor calculator)
+    x : any
+        Input to the function (e.g., RDKit molecule object)
+    default : any
+        Default value to return if function raises an exception
+        
+    Returns
+    -------
+    any
+        Result of f(x) if successful, otherwise default value
+    """
     try:
         return f(x)
     except Exception:
@@ -33,18 +84,82 @@ def safe(f, x, default):
 
 
 def mol2mw(mols: list[RDMol], is_valid: list[bool], default=1000):
+    """
+    Calculate molecular weight rewards for valid molecules.
+    
+    Computes a drug-likeness reward based on molecular weight, favoring
+    molecules in the typical drug weight range (~300-1000 Da). The reward
+    is 1.0 for molecules <= 300 Da, then linearly decreases to 0 at 1000 Da.
+    
+    Parameters
+    ----------
+    mols : list[RDMol]
+        List of RDKit molecule objects
+    is_valid : list[bool]
+        Boolean mask indicating which molecules are valid
+    default : float, default=1000
+        Default molecular weight for invalid molecules (gives 0 reward)
+        
+    Returns
+    -------
+    torch.Tensor
+        1D tensor of molecular weight rewards in [0, 1] range
+    """
     molwts = torch.tensor([safe(Descriptors.MolWt, i, default) for i, v in zip(mols, is_valid) if v])
     molwts = ((300 - molwts) / 700 + 1).clip(0, 1)  # 1 until 300 then linear decay to 0 until 1000
     return molwts
 
 
 def mol2sas(mols: list[RDMol], is_valid: list[bool], default=10):
+    """
+    Calculate synthetic accessibility score rewards for valid molecules.
+    
+    Computes rewards based on how easy molecules are to synthesize using
+    the SA Score algorithm. Lower SA scores (easier synthesis) give higher rewards.
+    
+    Parameters
+    ----------
+    mols : list[RDMol]
+        List of RDKit molecule objects
+    is_valid : list[bool]
+        Boolean mask indicating which molecules are valid
+    default : float, default=10
+        Default SA score for invalid molecules (worst possible, gives 0 reward)
+        
+    Returns
+    -------
+    torch.Tensor
+        1D tensor of synthetic accessibility rewards in [0, 1] range
+        Higher values indicate easier synthesis
+    """
     sas = torch.tensor([safe(sascore.calculateScore, i, default) for i, v in zip(mols, is_valid) if v])
-    sas = (10 - sas) / 9  # Turn into a [0-1] reward
+    sas = (10 - sas) / 9  # Turn into a [0-1] reward, inverting so higher = better
     return sas
 
 
 def mol2qed(mols: list[RDMol], is_valid: list[bool], default=0):
+    """
+    Calculate QED (Quantitative Estimate of Drug-likeness) rewards.
+    
+    Computes drug-likeness scores using the QED algorithm, which considers
+    multiple molecular descriptors including molecular weight, lipophilicity,
+    polar surface area, etc.
+    
+    Parameters
+    ----------
+    mols : list[RDMol]
+        List of RDKit molecule objects
+    is_valid : list[bool]
+        Boolean mask indicating which molecules are valid
+    default : float, default=0
+        Default QED score for invalid molecules (worst possible)
+        
+    Returns
+    -------
+    torch.Tensor
+        1D tensor of QED scores in [0, 1] range
+        Higher values indicate better drug-likeness
+    """
     return torch.tensor([safe(QED.qed, i, 0) for i, v in zip(mols, is_valid) if v])
 
 
