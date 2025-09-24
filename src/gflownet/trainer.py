@@ -1,3 +1,32 @@
+"""
+Main training harness for GFlowNet experiments.
+
+This module contains the core training loop and infrastructure for GFlowNet experiments.
+It provides a flexible framework that handles all the common aspects of training:
+- Model initialization and optimization
+- Data loading and batch processing  
+- Validation and checkpointing
+- Logging and metrics tracking
+- Device management and multiprocessing
+- Experiment reproducibility
+
+The trainer is designed to be subclassed for specific tasks, with the main training
+logic remaining generic while allowing customization of task-specific components
+like reward functions, data sources, and validation procedures.
+
+Key features:
+- Automatic device placement and mixed precision training
+- Integrated Weights & Biases logging
+- Flexible data source system supporting online/offline training
+- Comprehensive checkpointing and experiment resumption
+- Built-in validation loops with customizable metrics
+- Support for curriculum learning and adaptive sampling
+
+The training loop handles the interaction between algorithms, models, tasks, and
+data sources, orchestrating the complete training process from initialization
+to final evaluation.
+"""
+
 import gc
 import logging
 import os
@@ -30,22 +59,66 @@ from .config import Config
 
 
 class Closable(Protocol):
+    """
+    Protocol for objects that need cleanup at the end of training.
+    
+    This protocol defines the interface for objects that hold resources
+    (file handles, network connections, etc.) that need to be properly
+    closed when training completes or is interrupted.
+    """
     def close(self):
+        """Close/clean up resources held by this object."""
         pass
 
 
 class GFNTrainer:
+    """
+    Base class for GFlowNet training experiments.
+    
+    This class provides the main training infrastructure for GFlowNet experiments,
+    including the training loop, validation, checkpointing, and logging. It is
+    designed to be subclassed for specific tasks, with subclasses implementing
+    task-specific components like data sources, models, and reward functions.
+    
+    The trainer handles:
+    - Model initialization and optimization setup
+    - Training data loading and batch processing
+    - Training loop with loss computation and backpropagation
+    - Periodic validation and metric computation
+    - Checkpointing and experiment state management
+    - Logging to TensorBoard, Weights & Biases, and local files
+    - Device management and distributed training support
+    - Resource cleanup and graceful shutdown
+    
+    Attributes:
+        cfg (Config): Complete configuration for the experiment
+        print_config (bool): Whether to print configuration at startup
+        to_terminate (List[Closable]): Objects that need cleanup at shutdown
+        training_data (Dataset): Training dataset/data source
+        test_data (Dataset): Validation/test dataset
+        model (nn.Module): The GFlowNet model being trained
+        algo (GFNAlgorithm): The training algorithm (TB, SubTB, etc.)
+        task (GFNTask): The task defining rewards and objectives
+        env (GraphBuildingEnv): The environment for state space exploration
+        ctx (GraphBuildingEnvContext): Context for converting graphs to tensors
+    """
+    
     def __init__(self, config: Config, print_config=True):
-        """A GFlowNet trainer. Contains the main training loop in `run` and should be subclassed.
+        """
+        Initialize the GFlowNet trainer.
 
         Parameters
         ----------
-        config: Config
-            The hyperparameters for the trainer.
+        config : Config
+            Complete configuration object containing all hyperparameters
+            for the model, algorithm, task, optimization, etc.
+        print_config : bool, default=True
+            Whether to print the configuration at startup for debugging
         """
         self.print_config = print_config
         self.to_terminate: List[Closable] = []
-        # self.setup should at least set these up:
+        
+        # These attributes should be set by the setup() method in subclasses:
         self.training_data: Dataset
         self.test_data: Dataset
         self.model: nn.Module

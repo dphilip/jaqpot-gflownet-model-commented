@@ -1,3 +1,37 @@
+"""
+Results visualization and analysis script for GFlowNet experiments.
+
+This script generates plots and analyses for GFlowNet training results,
+including reward distributions, molecular visualizations, and performance
+comparisons against baseline datasets. It processes logged experiment data
+and creates publication-ready figures.
+
+Key functionality:
+- Load experimental results from SQLite logs
+- Generate reward distribution histograms with KDE smoothing
+- Create molecular structure visualizations using RDKit
+- Compare generated molecules against proxy datasets
+- Normalize and scale rewards for consistent visualization
+
+The script processes:
+- Training trajectory logs
+- Validation generation results  
+- Final generation samples
+- Proxy model predictions and ground truth data
+
+Output includes:
+- Reward distribution plots (histograms and KDE)
+- Molecular grid images showing generated structures
+- Performance comparison plots
+- Summary statistics and analysis
+
+Usage:
+    python make_plots.py
+
+Configuration is currently done by modifying the script variables directly.
+The script expects experiment logs in the standard GFlowNet directory structure.
+"""
+
 from pathlib import Path
 import pandas as pd
 from rdkit import Chem
@@ -5,27 +39,54 @@ from rdkit.Chem import Draw
 import matplotlib.pyplot as plt
 from gflownet.utils.sqlite_log import read_all_results
 
-y_min = -5.08
-y_max = 11.29
+# Reward normalization bounds (task-specific)
+y_min = -5.08  # Minimum reward value for normalization
+y_max = 11.29  # Maximum reward value for normalization
+
+# Path configuration - TODO: Make this configurable via command line
 current_dir = Path(".").resolve()
-# TODO: Do this in an automatic way
-run_name = "run"
+run_name = "run"  # Name of the experiment run to analyze
 target_dir = current_dir.parent / "src" / "gflownet" / "tasks" / "logs" / run_name
-# train_dir = target_dir / "train"
-# val_dir = target_dir / "valid"
-final_dir = target_dir / "final"
-# Final gen (Maybe generate 10.000 to match dataset)
+
+# Directory paths for different experiment phases
+# train_dir = target_dir / "train"    # Training logs (commented out)
+# val_dir = target_dir / "valid"      # Validation logs (commented out)  
+final_dir = target_dir / "final"      # Final generation results
+
+# Load experimental results from SQLite logs
+# Final generation results (consider generating 10,000 samples to match dataset size)
 results = read_all_results(final_dir)
-# Load proxy dataset
-data_name = "KOW.csv"
+
+# Load proxy dataset for comparison
+data_name = "KOW.csv"  # Proxy dataset filename
 proxy_path = current_dir.parent / "src" / "gflownet" / "proxy_chemprop" / "data"
 df = pd.read_csv(proxy_path / data_name)
-unorml_rew = df["active"].values
-norm_rew = ((unorml_rew - y_min) / (y_max - y_min)) * 10
+
+# Normalize proxy dataset rewards to match experimental setup
+unorml_rew = df["active"].values  # Raw reward values from proxy dataset
+norm_rew = ((unorml_rew - y_min) / (y_max - y_min)) * 10  # Normalized to [0, 10] scale
 
 
-# https://stackoverflow.com/questions/58989973/how-to-smooth-a-probability-distribution-plot-in-python
+# Utility function for generating smooth reward distribution plots
+# Reference: https://stackoverflow.com/questions/58989973/how-to-smooth-a-probability-distribution-plot-in-python
 def rew_hist(reward):
+    """
+    Generate a smooth histogram of rewards using kernel density estimation.
+    
+    This function creates a smoothed probability density plot from discrete reward
+    values, which is more visually appealing than standard histograms for
+    continuous-looking distributions.
+    
+    Parameters
+    ----------
+    reward : array-like
+        Array of reward values to plot
+        
+    Returns
+    -------
+    tuple
+        (x_values, density_values) for plotting the smooth distribution
+    """
     from scipy.stats import gaussian_kde
     import numpy as np
 

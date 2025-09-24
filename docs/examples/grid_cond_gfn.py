@@ -1,3 +1,34 @@
+"""
+Example: Conditional GFlowNet on 2D Grid Functions.
+
+This script demonstrates how to use GFlowNets for conditional generation on
+2D grid environments with function optimization objectives. It implements
+a simple example where the GFlowNet learns to generate trajectories on a
+2D grid to maximize various objective functions.
+
+Key features:
+- Grid-based environment for trajectory generation
+- Multi-objective optimization with Branin-Currin functions
+- Conditional generation with different preferences
+- Comparison between GFlowNet and baseline methods
+- Visualization and analysis of generated distributions
+
+The example is useful for:
+- Understanding GFlowNet behavior on simple, interpretable problems
+- Testing new algorithms on controlled environments
+- Educational purposes to visualize GFlowNet training dynamics
+- Benchmarking against known optimal solutions
+
+Usage:
+    python grid_cond_gfn.py --method flownet_tb --n_train_steps 5000
+
+The script supports various command-line arguments to control:
+- Training hyperparameters (learning rate, batch size, etc.)
+- Environment settings (horizon, objective function)
+- Measurement and evaluation parameters
+- Device and multiprocessing settings
+"""
+
 import argparse
 import gzip
 import itertools
