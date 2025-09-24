@@ -1,14 +1,40 @@
+"""
+LogP-based molecular generation task using fragment assembly and MPNN proxy models.
+
+This module implements a GFlowNet task for generating molecules optimized for logP
+(partition coefficient) values. It uses a pre-trained Message Passing Neural Network (MPNN)
+as a proxy model to predict logP values for generated molecules, enabling efficient
+optimization without expensive quantum chemical calculations.
+
+The task combines:
+- Fragment-based molecular construction using predefined building blocks
+- MPNN-based property prediction for fast evaluation
+- Temperature-based conditional generation for exploration control
+- Reward transformation to map logP values to appropriate ranges
+
+This setup is particularly useful for drug discovery applications where optimizing
+logP is important for ADMET properties (Absorption, Distribution, Metabolism,
+Excretion, Toxicity).
+"""
+
+# Standard library imports
 import os
 import yaml
 import socket
 from typing import Callable, Dict, List, Optional, Tuple, Union
+
+# PyTorch and scientific computing imports
 import torch
 import torch.nn as nn
 import numpy as np
 from lightning import pytorch as pl
+
+# Chemistry and molecular handling imports
 from rdkit.Chem.rdchem import Mol as RDMol
 from rdkit import Chem
 from torch import Tensor
+
+# GFlowNet framework imports
 from gflownet import GFNTask, LogScalar, ObjectProperties
 from gflownet.utils.yaml_utils import yml2cfg
 from gflownet.config import Config, init_empty
@@ -18,15 +44,32 @@ from gflownet.online_trainer import StandardOnlineTrainer
 from gflownet.utils.conditioning import TemperatureConditional
 from gflownet.utils.misc import get_worker_device
 from gflownet.utils.transforms import to_logreward
+
+# Proxy model imports for logP prediction
 from gflownet.proxy_chemprop.mpnn_pipeline import load_model
 from chemprop.featurizers import SimpleMoleculeMolGraphFeaturizer
 from chemprop import data
 
+# Default path to the pre-trained MPNN checkpoint for logP prediction
 CKP_PATH = "../proxy_chemprop/checkpoints/best-epoch=84-val_loss=0.06.ckpt"
 
 
 class LogPTask(GFNTask):
-    """Sets up a task where the reward is computed using a proxy mpnn model that outputs LogP of a molecule."""
+    """
+    GFlowNet task for logP-optimized molecular generation using fragment assembly.
+    
+    This class implements a complete task setup for generating molecules with optimized
+    logP values. It uses a fragment-based approach where molecules are built by
+    assembling predefined molecular fragments, with rewards computed using a fast
+    MPNN proxy model instead of expensive DFT calculations.
+    
+    The task handles:
+    - Loading and managing the MPNN proxy model for logP prediction
+    - Converting molecular graphs to appropriate input formats
+    - Computing rewards with proper transformation and scaling
+    - Conditional generation with temperature-based exploration
+    - Integration with the GFlowNet training framework
+    """
 
     def __init__(
         self,
@@ -37,16 +80,51 @@ class LogPTask(GFNTask):
         wrap_model: Optional[Callable[[nn.Module], nn.Module]] = None,
         mpnn_ckp_path: str = CKP_PATH,
     ) -> None:
-        self.cfg = cfg
-        self.rew_tran = rew_tran
-        self.y_min = y_min
-        self.y_max = y_max
-        self.width = y_max - y_min
+        """
+        Initialize the LogP optimization task with proxy model and parameters.
+        
+        Parameters
+        ----------
+        cfg : Config
+            Global configuration object containing all hyperparameters and settings
+            Includes model architecture, training parameters, and task-specific options
+        rew_tran : str, default="0-10"
+            Reward transformation specification for mapping logP values to rewards
+            Format: "{min}-{max}" defining the target reward range
+        y_min : float, default=-5.08
+            Minimum expected logP value in the dataset used for normalization
+            This value is used to scale predictions to the reward range
+        y_max : float, default=11.29
+            Maximum expected logP value in the dataset used for normalization
+            This value is used to scale predictions to the reward range
+        wrap_model : Optional[Callable], default=None
+            Optional model wrapper function for adding layers or transformations
+            If None, no additional wrapping is applied to the proxy model
+        mpnn_ckp_path : str, default=CKP_PATH
+            Path to the pre-trained MPNN checkpoint file for logP prediction
+            Should point to a valid ChemProp model checkpoint
+        """
+        # Store configuration and task parameters
+        self.cfg = cfg                          # Global configuration object
+        self.rew_tran = rew_tran               # Reward transformation specification
+        self.y_min = y_min                     # Minimum logP value for normalization
+        self.y_max = y_max                     # Maximum logP value for normalization
+        self.width = y_max - y_min             # Range width for scaling calculations
+        
+        # Set up model wrapping function (identity if none provided)
         self._wrap_model = wrap_model if wrap_model is not None else (lambda x: x)
+        
+        # Store path to MPNN checkpoint
         self.mpnn_ckp_path = mpnn_ckp_path
+        
+        # Load the pre-trained models for property prediction
         self.models = self._load_task_models()
+        
+        # Initialize temperature-based conditional generation
         self.temperature_conditional = TemperatureConditional(cfg)
         self.num_cond_dim = self.temperature_conditional.encoding_size()
+        
+        # Initialize molecular featurizer for converting molecules to model inputs
         self.featurizer = SimpleMoleculeMolGraphFeaturizer()
 
     def reward_transform(self, y: Union[float, Tensor]) -> ObjectProperties:

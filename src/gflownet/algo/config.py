@@ -1,57 +1,111 @@
+"""
+Configuration classes for GFlowNet training algorithms.
+
+This module defines the configuration structure for various GFlowNet training algorithms
+including Trajectory Balance (TB), Flow Matching (FM), Multi-Objective Q-Learning (MOQL),
+Advantage Actor-Critic (A2C), and SQL-based methods. Each algorithm has its own specific
+hyperparameters while sharing common base parameters.
+
+The configuration system uses enums for categorical choices and dataclasses for
+structured parameter organization, ensuring type safety and clear documentation
+of all available options.
+"""
+
+# Standard library imports for dataclass and enum functionality
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
+# GFlowNet utility imports
 from gflownet.utils.misc import StrictDataClass
 
 
 class Backward(IntEnum):
     """
-    See algo.trajectory_balance.TrajectoryBalance for details.
-    The A variant of `Maxent` and `GSQL` equire the environment to provide $n$.
-    This is true for sEH but not QM9.
+    Enumeration of backward policy types for Trajectory Balance algorithms.
+    
+    The backward policy P_B(s|s') defines the probability of transitioning from
+    state s' back to state s. Different backward policies have different properties
+    and computational requirements:
+    
+    - Uniform: Simple uniform distribution (baseline approach)
+    - Free: Fully parameterized backward policy (most flexible)
+    - Maxent: Maximum entropy formulation for exploration
+    - MaxentA/GSQLA: Advanced variants requiring environment-provided n values
+    
+    See TrajectoryBalance class documentation for detailed mathematical formulations.
+    Note: The 'A' variants (MaxentA, GSQLA) require the environment to provide
+    the number of valid actions n, which is available for sEH but not QM9 tasks.
     """
-
-    Uniform = 1
-    Free = 2
-    Maxent = 3
-    MaxentA = 4
-    GSQL = 5
-    GSQLA = 6
+    
+    Uniform = 1   # Uniform backward policy (simple baseline)
+    Free = 2      # Fully parameterized backward policy  
+    Maxent = 3    # Maximum entropy backward policy
+    MaxentA = 4   # Maxent variant requiring environment n values
+    GSQL = 5      # Graph SQL backward policy
+    GSQLA = 6     # Graph SQL variant requiring environment n values
 
 
 class NLoss(IntEnum):
-    """See algo.trajectory_balance.TrajectoryBalance for details."""
-
-    none = 0
-    Transition = 1
-    SubTB1 = 2
-    TermTB1 = 3
-    StartTB1 = 4
-    TB = 5
+    """
+    Enumeration of loss functions for learning the number of paths n.
+    
+    These loss functions are used when learning to predict the number of valid
+    action sequences from each state, which is important for flow conservation
+    in GFlowNet algorithms. Different formulations provide different trade-offs
+    between computational efficiency and learning accuracy.
+    
+    See TrajectoryBalance class for mathematical details of each loss type.
+    """
+    
+    none = 0        # No n-loss (don't learn path counts)
+    Transition = 1  # Transition-based n-loss  
+    SubTB1 = 2      # Sub-trajectory balance variant 1
+    TermTB1 = 3     # Terminal trajectory balance variant 1
+    StartTB1 = 4    # Starting trajectory balance variant 1
+    TB = 5          # Full trajectory balance n-loss
 
 
 class TBVariant(IntEnum):
-    """See algo.trajectory_balance.TrajectoryBalance for details."""
-
-    TB = 0
-    SubTB1 = 1
-    DB = 2
+    """
+    Enumeration of Trajectory Balance algorithm variants.
+    
+    These variants represent different formulations of the trajectory balance
+    objective, each with different properties for learning efficiency and
+    computational requirements:
+    
+    - TB: Standard trajectory balance (full trajectories)
+    - SubTB1: Sub-trajectory balance (partial trajectories) 
+    - DB: Detailed balance (single transitions)
+    
+    See TrajectoryBalance class documentation for detailed mathematical formulations.
+    """
+    
+    TB = 0      # Standard Trajectory Balance (full trajectories)
+    SubTB1 = 1  # Sub-Trajectory Balance variant 1 (partial trajectories)
+    DB = 2      # Detailed Balance (single transitions)
 
 
 class LossFN(IntEnum):
     """
-    The loss function to use.
-
-    - GHL:  Kaan Gokcesu, Hakan Gokcesu
-    https://arxiv.org/pdf/2108.12627.pdf,
-    Note: This can be used as a differentiable version of HUB.
+    Enumeration of loss functions for training GFlowNet models.
+    
+    Different loss functions provide different properties for optimization:
+    - MSE: Standard mean squared error (smooth, differentiable)
+    - MAE: Mean absolute error (robust to outliers)
+    - HUB: Huber loss (smooth near zero, linear for large errors)
+    - GHL: Generalized Huber Loss (differentiable variant of Huber)
+    
+    References:
+    GHL formulation from Kaan Gokcesu, Hakan Gokcesu
+    https://arxiv.org/pdf/2108.12627.pdf
+    Note: GHL can be used as a differentiable version of Huber loss.
     """
-
-    MSE = 0
-    MAE = 1
-    HUB = 2
-    GHL = 3
+    
+    MSE = 0  # Mean Squared Error (L2 loss)
+    MAE = 1  # Mean Absolute Error (L1 loss)  
+    HUB = 2  # Huber Loss (smooth L1)
+    GHL = 3  # Generalized Huber Loss (differentiable Huber variant)
 
 
 @dataclass
