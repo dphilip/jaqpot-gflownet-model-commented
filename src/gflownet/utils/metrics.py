@@ -1,12 +1,39 @@
+"""
+Multi-objective optimization metrics and utilities for GFlowNet evaluation.
+
+This module provides a comprehensive collection of metrics for evaluating the
+performance of multi-objective optimization algorithms, particularly in the context
+of GFlowNet training. It includes various measures of diversity, convergence,
+and solution quality commonly used in multi-objective evolutionary algorithms.
+
+Key metrics included:
+- Hypervolume: Volume of objective space dominated by solutions
+- IGD: Inverse Generational Distance to reference Pareto front
+- Focus coefficients: Measures of alignment with preferred regions
+- Pareto frontier analysis: Identification and evaluation of non-dominated solutions
+- Diversity measures: Tanimoto similarity, clustering-based diversity
+- HSR indicator: Hypervolume-based Sharpe Ratio for portfolio optimization
+- Entropy measures: Distribution analysis of solutions in objective space
+
+The module is designed to handle both synthetic benchmark problems and 
+real-world applications like molecular generation and financial portfolio optimization.
+"""
+
+# Standard library imports for mathematical operations
 import math
 from copy import deepcopy
 from itertools import product
 
+# Numerical computing and machine learning imports
 import numpy as np
 import torch
 import torch.nn as nn
+
+# Multi-objective optimization specific imports
 from botorch.utils.multi_objective import infer_reference_point, pareto
 from botorch.utils.multi_objective.hypervolume import Hypervolume
+
+# Chemistry and molecular similarity imports  
 from rdkit import Chem, DataStructs
 from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
@@ -16,71 +43,201 @@ def compute_focus_coef(
     flat_rewards: torch.Tensor, focus_dirs: torch.Tensor, focus_cosim: float, focus_limit_coef: float = 1.0
 ):
     """
-    The focus direction is defined as a hypercone in the objective space centered around an focus_dir.
-    The focus coefficient (between 0 and 1) scales the reward associated to a given sample.
-    It should be 1 when the sample is exactly at the focus direction, equal to the focus_limit_coef
-        when the sample is at on the limit of the focus region and 0 when it is outside the focus region
-        we can use an exponential decay of the focus coefficient between the center and the limit of the focus region
-        i.e. cosim(sample, focus_dir) ** focus_gamma_param = focus_limit_coef
-    Note that we work in the positive quadrant (each reward is positive) and thus the cosine similarity is in [0, 1]
-
-    :param focus_dirs: the focus directions, shape (batch_size, num_objectives)
-    :param flat_rewards: the flat rewards, shape (batch_size, num_objectives)
-    :param focus_cosim: the cosine similarity threshold to define the focus region
-    :param focus_limit_coef: the focus coefficient at the limit of the focus region
+    Compute focus coefficients for reward scaling based on directional preferences.
+    
+    This function implements a focusing mechanism that scales rewards based on their
+    alignment with specified preference directions in the objective space. It creates
+    a hypercone-shaped focus region where rewards are scaled according to their
+    cosine similarity to the focus direction.
+    
+    The focus coefficient follows an exponential decay pattern:
+    - 1.0 when exactly aligned with focus direction (cosim = 1.0)  
+    - focus_limit_coef at the boundary of the focus region (cosim = focus_cosim)
+    - 0.0 outside the focus region (cosim < focus_cosim)
+    
+    This is particularly useful for multi-objective optimization where you want to
+    emphasize solutions in specific regions of the objective space while still
+    maintaining some exploration elsewhere.
+    
+    Parameters
+    ----------
+    flat_rewards : torch.Tensor
+        Reward vectors for each sample, shape (batch_size, num_objectives)
+        Each row represents a point in the objective space
+    focus_dirs : torch.Tensor  
+        Focus direction vectors, shape (batch_size, num_objectives)
+        Each row specifies the preferred direction for the corresponding sample
+    focus_cosim : float
+        Cosine similarity threshold defining the boundary of the focus region
+        Must be in [0, 1] where higher values create narrower focus regions
+    focus_limit_coef : float, default=1.0
+        Focus coefficient value at the boundary of the focus region
+        Must be in (0, 1] where lower values create steeper decay
+        
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        - focus_coef: Focus coefficients for each sample, shape (batch_size,)
+        - in_focus_mask: Boolean mask indicating samples within focus region
+        
+    Examples
+    --------
+    >>> rewards = torch.tensor([[0.8, 0.6], [0.3, 0.9]])  
+    >>> directions = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    >>> coef, mask = compute_focus_coef(rewards, directions, 0.7, 0.5)
     """
+    # Validate input parameters to ensure they are in valid ranges
     assert focus_cosim >= 0.0 and focus_cosim <= 1.0, f"focus_cosim must be in [0, 1], now {focus_cosim}"
     assert (
         focus_limit_coef > 0.0 and focus_limit_coef <= 1.0
     ), f"focus_limit_coef must be in (0, 1], now {focus_limit_coef}"
+    
+    # Calculate the exponential decay parameter for the focus coefficient
+    # This ensures that cosim^gamma = focus_limit_coef when cosim = focus_cosim
     focus_gamma_param = torch.tensor(np.log(focus_limit_coef) / np.log(focus_cosim)).float()
+    
+    # Compute cosine similarity between rewards and focus directions
     cosim = nn.functional.cosine_similarity(flat_rewards, focus_dirs, dim=1)
+    
+    # Create boolean mask for samples within the focus region
     in_focus_mask = cosim >= focus_cosim
+    
+    # Compute focus coefficients: exponential decay inside focus region, 0 outside
     focus_coef = torch.where(in_focus_mask, cosim**focus_gamma_param, 0.0)
+    
     return focus_coef, in_focus_mask
 
 
 def get_focus_accuracy(flat_rewards, focus_dirs, focus_cosim):
+    """
+    Calculate the fraction of samples that fall within the specified focus region.
+    
+    This function provides a simple metric for evaluating how well a set of solutions
+    aligns with desired preference directions. It computes the percentage of samples
+    that have sufficient cosine similarity to their corresponding focus directions.
+    
+    Parameters
+    ----------
+    flat_rewards : torch.Tensor
+        Reward vectors for each sample, shape (batch_size, num_objectives)
+    focus_dirs : torch.Tensor
+        Focus direction vectors, shape (batch_size, num_objectives)  
+    focus_cosim : float
+        Cosine similarity threshold for the focus region boundary
+        
+    Returns
+    -------
+    torch.Tensor
+        Scalar value representing the fraction of samples in focus (0.0 to 1.0)
+    """
+    # Use the focus coefficient computation to get the focus mask
     _, in_focus_mask = compute_focus_coef(focus_dirs, flat_rewards, focus_cosim, focus_limit_coef=1.0)
+    
+    # Return the fraction of samples that are within the focus region
     return in_focus_mask.float().sum() / len(flat_rewards)
 
 
 def get_limits_of_hypercube(n_dims, n_points_per_dim=10):
-    """Discretise the faces that are at the extremity of a unit hypercube"""
+    """
+    Generate reference points on the faces of a unit hypercube for benchmark testing.
+    
+    This function creates a set of points that lie on the boundary faces of a unit
+    hypercube in n-dimensional space. These points are useful as reference sets
+    for computing performance metrics like IGD (Inverse Generational Distance)
+    when no true Pareto front is known.
+    
+    The function discretizes each dimension into equally spaced points and then
+    selects only those points that lie on at least one face of the hypercube
+    (i.e., have at least one coordinate equal to 1.0).
+    
+    Parameters
+    ----------
+    n_dims : int
+        Number of dimensions (objectives) in the hypercube
+        Determines the dimensionality of the generated reference points
+    n_points_per_dim : int, default=10
+        Number of discretization points along each dimension
+        Higher values provide denser coverage but exponentially more points
+        
+    Returns
+    -------
+    np.ndarray
+        Array of shape (n_extreme_points, n_dims) containing the boundary points
+        Each row is a point on the hypercube boundary with at least one coordinate = 1.0
+        
+    Examples
+    --------  
+    >>> points = get_limits_of_hypercube(2, 3)  # 2D square with 3 points per side
+    >>> # Returns points like [[0, 1], [0.5, 1], [1, 0], [1, 0.5], [1, 1]]
+    """
+    # Create linear spaces for each dimension from 0 to 1
     linear_spaces = [np.linspace(0.0, 1.0, n_points_per_dim) for _ in range(n_dims)]
+    
+    # Generate all combinations of points in the hypercube (Cartesian product)
     grid = np.array(list(product(*linear_spaces)))
+    
+    # Select only points that lie on the boundary (at least one coordinate equals 1.0)
+    # This gives us the "extreme" points on the faces of the hypercube
     extreme_points = grid[np.any(grid == 1, axis=1)]
+    
     return extreme_points
 
 
 def get_IGD(samples, ref_front: np.ndarray = None):
     """
-    Computes the Inverse Generational Distance of a set of samples w.r.t a reference pareto front.
-    see: https://www.sciencedirect.com/science/article/abs/pii/S0377221720309620
-
-    For each point of a reference pareto front `ref_front`, compute the distance to the closest
-    sample. Returns the average of these distances.
-
-    Args:
-        front (ndarray): A numpy array containing the coordinates of the points
-            on the Pareto front. The tensor should have shape (n_points, n_objectives).
-        ref_front (ndarray): A numpy array containing the coordinates of the points
-            on the true Pareto front. The tensor should have shape (n_true_points, n_objectives).
-
-    Returns:
-        float: The IGD value.
+    Compute the Inverse Generational Distance (IGD) of samples relative to a reference front.
+    
+    IGD measures the average distance from each point on a reference Pareto front to the
+    closest point in the sample set. It provides a measure of both convergence (how close
+    samples are to the true front) and coverage (how well samples cover the front).
+    
+    Lower IGD values indicate better performance, with 0 being perfect (samples exactly
+    match the reference front). IGD is widely used in multi-objective optimization for
+    comparing algorithm performance.
+    
+    The metric is computed as:
+    IGD = (1/|P*|) * Σ_{p ∈ P*} min_{s ∈ S} d(p, s)
+    where P* is the reference front, S is the sample set, and d is Euclidean distance.
+    
+    Parameters
+    ----------
+    samples : np.ndarray
+        Generated samples to evaluate, shape (n_samples, n_objectives)
+        Each row represents a point in the objective space
+    ref_front : np.ndarray, optional
+        Reference Pareto front, shape (n_ref_points, n_objectives)
+        If None, uses the hypercube boundary as reference (for unit cube problems)
+        
+    Returns
+    -------
+    float
+        IGD value (lower is better, 0 is perfect)
+        
+    References
+    ----------
+    https://www.sciencedirect.com/science/article/abs/pii/S0377221720309620
+    
+    Examples
+    --------
+    >>> samples = np.array([[0.8, 0.2], [0.3, 0.7], [0.6, 0.5]])
+    >>> ref_front = np.array([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]])
+    >>> igd = get_IGD(samples, ref_front)
     """
+    # Get the number of objectives from the sample shape
     n_objectives = samples.shape[1]
+    
+    # Use hypercube boundary as default reference if none provided
     if ref_front is None:
         ref_front = get_limits_of_hypercube(n_dims=n_objectives)
 
-    # Compute the distances between each generated sample and each reference point.
+    # Compute pairwise distances between reference points and samples
+    # distances[i, j] = distance from ref_point[i] to sample[j]
     distances = cdist(samples, ref_front).T
 
-    # Find the minimum distance for each point on the front.
+    # For each reference point, find the minimum distance to any sample
     min_distances = np.min(distances, axis=1)
 
-    # Compute the igd as the average of the minimum distances.
+    # IGD is the average of these minimum distances
     igd = np.mean(min_distances, axis=0)
 
     return float(igd)

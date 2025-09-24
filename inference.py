@@ -48,56 +48,66 @@ current_dir = Path(".").resolve()
 run_name = "run"  # Directory name containing the trained model
 proxy_ckp = "best-epoch=84-val_loss=0.06.ckpt"  # Proxy model checkpoint filename
 
-# Construct paths to required files
+# Construct paths to required files using current directory as base
 yaml_dir = current_dir / "src" / "gflownet" / "tasks" / "logs" / run_name / "config.yaml"
 model_dir = current_dir / "src" / "gflownet" / "tasks" / "logs" / run_name / "model_state.pt"  
 proxy_dir = current_dir / "src" / "gflownet" / "proxy_chemprop" / "checkpoints" / proxy_ckp
 
-# Load configuration from YAML file
+# Load configuration from YAML file containing training hyperparameters
 cfg = OmegaConf.load(yaml_dir)
+
 # Initialize the graph building environment and temperature conditioning
-env = GraphBuildingEnv()  # Core environment for graph construction
-temp_cond = TemperatureConditional(cfg)  # Temperature-based conditioning
-num_cond_dim = temp_cond.encoding_size()  # Get dimensionality of conditioning
+env = GraphBuildingEnv()  # Core environment for graph construction operations
+temp_cond = TemperatureConditional(cfg)  # Temperature-based conditioning for exploration control
+num_cond_dim = temp_cond.encoding_size()  # Get dimensionality of conditioning vectors
 
 # Set up the fragment-based molecular building context
+# This context defines how molecules are constructed from molecular fragments
 ctx = FragMolBuildingEnvContext(
-    max_frags=cfg.algo.max_nodes,  # Maximum number of fragments allowed
-    num_cond_dim=num_cond_dim,     # Conditioning dimension size
-    fragments=bengio2021flow.FRAGMENTS,  # Available molecular fragments
+    max_frags=cfg.algo.max_nodes,  # Maximum number of fragments allowed in a molecule
+    num_cond_dim=num_cond_dim,     # Conditioning dimension size for context vectors
+    fragments=bengio2021flow.FRAGMENTS,  # Predefined set of molecular fragments to use
 )
+
 # Initialize the GFlowNet model architecture
+# GraphTransformerGFN uses graph attention to predict actions on molecular graphs
 model = GraphTransformerGFN(
-    env_ctx=ctx,  # Environment context for molecular building
-    cfg=cfg,      # Configuration parameters
-    num_graph_out=cfg.algo.tb.do_predict_n + 1,  # Number of graph-level outputs
+    env_ctx=ctx,  # Environment context for molecular building operations
+    cfg=cfg,      # Configuration parameters from loaded YAML file
+    num_graph_out=cfg.algo.tb.do_predict_n + 1,  # Number of graph-level output predictions
     do_bck=cfg.algo.tb.do_parameterize_p_b,      # Whether to parameterize backward policy
 )
 
-# Load pre-trained model weights from checkpoint
+# Load pre-trained model weights from checkpoint file
+# The checkpoint contains the trained parameters from the GFlowNet training process
 model.load_state_dict((torch.load(model_dir)["sampling_model_state_dict"][0]))
-model.eval()  # Set model to evaluation mode
-# Initialize the trajectory balance algorithm for sampling
+model.eval()  # Set model to evaluation mode (disables dropout, batch norm updates)
+
+# Initialize the trajectory balance algorithm for sampling trajectories
+# This algorithm manages the sampling process and trajectory construction
 algo = TrajectoryBalance(env, ctx, cfg)
 
-# Set random seeds for reproducible results
-np.random.seed(42)
-torch.manual_seed(42)
+# Set random seeds for reproducible results across multiple runs
+np.random.seed(42)   # NumPy random seed
+torch.manual_seed(42)  # PyTorch random seed
 
-# Sample conditioning information (temperature settings)
+# Sample conditioning information (temperature settings for exploration)
+# Temperature conditioning controls the exploration-exploitation trade-off
 cond_info = temp_cond.sample(10)["encoding"]
 
 # Generate molecular samples using the trained model
+# This creates 10 molecular trajectories by sampling from the learned policy
 samples = algo.create_training_data_from_own_samples(model=model, n=10, cond_info=cond_info)
 
-# Extract trajectories and convert to RDKit molecules
-trajectories = [sample["traj"] for sample in samples]
+# Extract trajectories and convert to RDKit molecules for analysis
+trajectories = [sample["traj"] for sample in samples]  # List of state-action trajectories
 # valid = [sample["is_valid"] for sample in samples]  # Validity flags (commented out)
-rdkit_mols = [ctx.graph_to_obj(traj[-1][0]) for traj in trajectories]
-# Evaluate generated molecules using proxy ChemProp model
-# TODO: Automate this process for better integration
+rdkit_mols = [ctx.graph_to_obj(traj[-1][0]) for traj in trajectories]  # Convert final states to RDKit molecules
 
-# Load the pre-trained proxy model for property prediction
+# Evaluate generated molecules using proxy ChemProp model
+# TODO: Automate this process for better integration with the inference pipeline
+
+# Load the pre-trained proxy model for molecular property prediction
 model = load_model(proxy_dir)
 featurizer = SimpleMoleculeMolGraphFeaturizer()  # Molecular graph featurizer
 

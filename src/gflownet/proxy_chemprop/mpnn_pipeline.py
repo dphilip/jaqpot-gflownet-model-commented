@@ -1,47 +1,128 @@
+"""
+ChemProp-based MPNN training pipeline for molecular property prediction.
+
+This module implements a complete training pipeline for Message Passing Neural Networks (MPNNs)
+using the ChemProp library. It provides functionality for training molecular property predictors
+that can serve as proxy models in GFlowNet training, enabling efficient reward computation
+without expensive quantum chemical calculations.
+
+The pipeline includes:
+- Data loading and preprocessing for molecular datasets
+- MPNN model configuration and training
+- Weights & Biases integration for experiment tracking
+- Model checkpointing and evaluation
+- Integration with GFlowNet reward computation
+
+This is particularly useful for drug discovery applications where fast property
+prediction is needed for molecular optimization tasks.
+
+TODO:
+- Integrate with GFlowNet MPNN inference pipeline  
+- Add support for multi-GPU training configurations
+- Create submodule integration for forked repositories
+"""
+
+# Standard library imports for randomization and data handling
 import random
 import numpy as np
+
+# PyTorch imports for neural network training
 import torch
 import wandb
 from lightning import pytorch as pl
 import matplotlib.pyplot as plt
 from lightning.pytorch.callbacks import ModelCheckpoint
 import pandas as pd
-from chemprop import data, featurizers, models, nn
 
-# TODO: Also need to try and integrate this in the gflownet mpnn inference
-# TODO: I also need how to create a repo and import 2 forked ones with submodules
-# TODO: When used for gpu training change the project name to create new one
+# ChemProp imports for molecular property prediction
+from chemprop import data, featurizers, models, nn
 
 
 def set_seed(seed: int = 42):
+    """
+    Set random seeds for reproducible experiments across all libraries.
+    
+    This function ensures reproducible results by setting seeds for all major
+    random number generators used in the training pipeline. This is crucial
+    for scientific reproducibility and debugging.
+    
+    Parameters
+    ----------
+    seed : int, default=42
+        Random seed value to use across all libraries
+        Using the same seed should produce identical results
+        
+    Notes
+    -----
+    Setting torch.backends.cudnn.deterministic=True may reduce performance
+    but ensures reproducibility when using CUDA operations.
+    """
+    # Set Python's built-in random seed
     random.seed(seed)
+    # Set NumPy random seed for array operations
     np.random.seed(seed)
+    # Set PyTorch CPU random seed
     torch.manual_seed(seed)
+    # Set PyTorch GPU random seed for current device
     torch.cuda.manual_seed(seed)
+    # Set PyTorch GPU random seed for all devices
     torch.cuda.manual_seed_all(seed)
+    # Ensure deterministic CUDA operations (may reduce performance)
     torch.backends.cudnn.deterministic = True
+    # Disable CUDA optimization heuristics for reproducibility
     torch.backends.cudnn.benchmark = False
 
 
 def setup_run(args):
+    """
+    Initialize Weights & Biases experiment tracking with hyperparameters.
+    
+    This function sets up comprehensive experiment logging by connecting to
+    Weights & Biases and initializing a new run with all relevant hyperparameters.
+    This enables tracking of training progress, hyperparameter comparisons,
+    and result visualization.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace or object
+        Command line arguments or configuration object containing:
+        - project_name: W&B project name for organizing experiments
+        - MPNN hyperparameters: architecture and training parameters
+        - Optimization parameters: learning rates and schedules
+        
+    Notes
+    -----
+    Requires W&B authentication to be set up prior to calling this function.
+    The logged hyperparameters should match the actual training configuration.
+    """
+    # Authenticate with Weights & Biases
     wandb.login()
+    
+    # Initialize new experiment run with comprehensive hyperparameter logging
     wandb.init(
-        project=args.project_name,
+        project=args.project_name,  # Project name for organizing related experiments
         config={
-            "scaling": args.scaling,
-            "batch_size": args.batch_size,
-            "message_hidden_dim": args.message_hidden_dim,
-            "depth": args.depth,
-            "dropout": args.dropout,
-            "activation_mpnn": args.activation_mpnn,
-            "aggregation": args.aggregation,
-            "hidden_dim_readout": args.hidden_dim_readout,
-            "hidden_layers_readout": args.hidden_layers_readout,
-            "dropout_readout": args.dropout_readout,
-            "batch_norm": args.batch_norm,
-            "init_lr": args.init_lr,
-            "max_lr": args.max_lr,
-            "final_lr": args.final_lr,
+            # Data preprocessing parameters
+            "scaling": args.scaling,                        # Feature scaling method
+            "batch_size": args.batch_size,                  # Training batch size
+            
+            # MPNN architecture parameters
+            "message_hidden_dim": args.message_hidden_dim,  # Hidden dimension for message passing
+            "depth": args.depth,                            # Number of message passing layers
+            "dropout": args.dropout,                        # Dropout rate in MPNN layers
+            "activation_mpnn": args.activation_mpnn,        # Activation function for MPNN
+            "aggregation": args.aggregation,                # Message aggregation method
+            
+            # Readout network parameters  
+            "hidden_dim_readout": args.hidden_dim_readout,  # Hidden dimension for readout MLP
+            "hidden_layers_readout": args.hidden_layers_readout,  # Number of readout layers
+            "dropout_readout": args.dropout_readout,        # Dropout rate in readout layers
+            "batch_norm": args.batch_norm,                  # Whether to use batch normalization
+            
+            # Optimization parameters
+            "init_lr": args.init_lr,                        # Initial learning rate
+            "max_lr": args.max_lr,                          # Maximum learning rate (for schedules)
+            "final_lr": args.final_lr,                      # Final learning rate (for schedules)
         },
     )
 

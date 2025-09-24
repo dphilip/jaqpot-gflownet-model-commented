@@ -1,11 +1,28 @@
+"""
+Graph sampling utilities for GFlowNet trajectory generation.
+
+This module provides the core sampling functionality for generating trajectories
+from trained GFlowNet models. It handles the step-by-step construction of graphs
+by sampling actions from the model's policy and maintaining trajectory statistics.
+
+The main component is GraphSampler, which manages the sampling process including:
+- Action sampling with optional temperature scaling
+- Trajectory statistics tracking (forward/backward log probabilities)
+- Graph validation and terminal state detection
+- Support for conditional generation with context information
+"""
+
+# Standard library imports
 import copy
 import warnings
 from typing import List, Optional
 
+# PyTorch imports for neural networks and tensors
 import torch
 import torch.nn as nn
 from torch import Tensor
 
+# GFlowNet environment imports for graph building
 from gflownet.envs.graph_building_env import (
     Graph,
     GraphAction,
@@ -13,60 +30,118 @@ from gflownet.envs.graph_building_env import (
     GraphActionType,
     action_type_to_mask,
 )
+# Model and utility imports
 from gflownet.models.graph_transformer import GraphTransformerGFN
 from gflownet.utils.misc import get_worker_device, get_worker_rng
 
 
 def relabel(g: Graph, ga: GraphAction):
-    """Relabel the nodes for g to 0-N, and the graph action ga applied to g.
-    This is necessary because torch_geometric and EnvironmentContext classes expect nodes to be
-    labeled 0-N, whereas GraphBuildingEnv.parent can return parents with e.g. a removed node that
-    creates a gap in 0-N, leading to a faulty encoding of the graph.
     """
+    Relabel graph nodes to ensure 0-N consecutive numbering and update corresponding actions.
+    
+    This function is essential for maintaining compatibility with torch_geometric and
+    EnvironmentContext classes which expect nodes to be labeled consecutively from 0 to N-1.
+    When GraphBuildingEnv operations create gaps in node numbering (e.g., after node removal),
+    this function renumbers nodes and updates action references accordingly.
+    
+    Parameters
+    ----------
+    g : Graph
+        Input graph that may have non-consecutive node labels
+        Nodes may be labeled with arbitrary integers due to previous operations
+    ga : GraphAction  
+        Graph action that references nodes in the original labeling
+        May contain source/target node references that need updating
+        
+    Returns
+    -------
+    tuple[Graph, GraphAction]
+        - Relabeled graph with nodes numbered 0 to len(nodes)-1
+        - Updated graph action with corrected node references
+        
+    Notes
+    -----
+    Special handling for empty graphs with AddNode action: the source remains 0
+    since AddNode can be applied to empty graphs where node 0 is the implicit root.
+    """
+    # Create mapping from old node labels to new consecutive labels 0, 1, 2, ...
     rmap = dict(zip(g.nodes, range(len(g.nodes))))
+    
+    # Special case: AddNode on empty graph keeps source as 0
     if not len(g) and ga.action == GraphActionType.AddNode:
         rmap[0] = 0  # AddNode can add to the empty graph, the source is still 0
+    
+    # Apply relabeling to the graph using the mapping
     g = g.relabel_nodes(rmap)
+    
+    # Update action source node reference if it exists
     if ga.source is not None:
         ga.source = rmap[ga.source]
+    
+    # Update action target node reference if it exists    
     if ga.target is not None:
         ga.target = rmap[ga.target]
+        
     return g, ga
 
 
 class GraphSampler:
-    """A helper class to sample from GraphActionCategorical-producing models"""
+    """
+    A helper class for sampling graph trajectories from GFlowNet models.
+    
+    This class orchestrates the sampling process for generating graph trajectories
+    by repeatedly querying a GFlowNet model and applying the sampled actions to
+    build graphs step by step. It handles trajectory tracking, validation, and
+    supports various experimental features for improved sampling.
+    
+    The sampler maintains trajectory statistics including forward and backward
+    log probabilities, handles terminal state detection, and can optionally
+    apply temperature scaling for exploration control.
+    """
 
     def __init__(
         self, ctx, env, max_len, max_nodes, sample_temp=1, correct_idempotent=False, pad_with_terminal_state=False
     ):
         """
+        Initialize the GraphSampler with environment and sampling parameters.
+        
         Parameters
         ----------
-        env: GraphBuildingEnv
-            A graph environment.
-        ctx: GraphBuildingEnvContext
-            A context.
-        max_len: int
-            If not None, ends trajectories of more than max_len steps.
-        max_nodes: int
-            If not None, ends trajectories of graphs with more than max_nodes steps (illegal action).
-        sample_temp: float
-            [Experimental] Softmax temperature used when sampling
-        correct_idempotent: bool
-            [Experimental] Correct for idempotent actions when counting
-        pad_with_terminal_state: bool
-            [Experimental] If true pads trajectories with a terminal
+        env : GraphBuildingEnv
+            The graph building environment that defines valid actions and transitions
+            Handles graph state management and action application
+        ctx : GraphBuildingEnvContext
+            Environment context providing graph representation and action space details
+            Defines how graphs are encoded and what actions are available
+        max_len : int
+            Maximum number of steps allowed in a trajectory before forced termination
+            Prevents infinite loops and controls computational cost
+        max_nodes : int  
+            Maximum number of nodes allowed in generated graphs before forced termination
+            Prevents memory issues with extremely large graphs
+        sample_temp : float, default=1
+            Softmax temperature for action sampling (experimental feature)
+            Values < 1 make sampling more deterministic, > 1 more exploratory
+        correct_idempotent : bool, default=False
+            Whether to apply corrections for idempotent actions in probability calculations
+            Experimental feature for handling actions that don't change the graph state
+        pad_with_terminal_state : bool, default=False
+            Whether to pad trajectories with explicit terminal states for consistent length
+            Experimental feature for batch processing of variable-length trajectories
         """
-        self.ctx = ctx
-        self.env = env
+        # Store core environment components
+        self.ctx = ctx     # Environment context for graph operations
+        self.env = env     # Graph building environment for state transitions
+        
+        # Set trajectory length limits with defaults to prevent runaway generation
         self.max_len = max_len if max_len is not None else 128
         self.max_nodes = max_nodes if max_nodes is not None else 128
-        # Experimental flags
-        self.sample_temp = sample_temp
-        self.sanitize_samples = True
-        self.correct_idempotent = correct_idempotent
-        self.pad_with_terminal_state = pad_with_terminal_state
+        
+        # Experimental sampling parameters
+        self.sample_temp = sample_temp                      # Temperature for action sampling
+        self.sanitize_samples = True                        # Whether to validate generated samples
+        self.correct_idempotent = correct_idempotent        # Idempotent action correction
+        self.pad_with_terminal_state = pad_with_terminal_state  # Terminal state padding
 
     def sample_from_model(self, model: nn.Module, n: int, cond_info: Optional[Tensor], random_action_prob: float = 0.0):
         """Samples a model in a minibatch
