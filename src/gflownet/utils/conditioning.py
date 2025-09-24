@@ -1,3 +1,27 @@
+"""
+Conditional generation utilities for GFlowNets.
+
+This module provides functionality for conditional generation in GFlowNets,
+where the generation process is conditioned on various types of information
+such as temperature, preferences, or focus regions. This enables controllable
+generation and multi-objective optimization.
+
+Key conditioning types:
+- TemperatureConditional: Controls exploration vs exploitation trade-off
+- WeightedPreferencesConditional: Multi-objective optimization with preferences  
+- FocusRegionConditional: Focuses generation on specific property regions
+- MultiObjectiveWeightedPreferencesConditional: Advanced multi-objective setup
+
+The conditioning system works by:
+1. Sampling conditioning information during training
+2. Encoding the conditioning into tensor representations
+3. Using the conditioning to transform raw object properties into rewards
+4. Passing encoded conditioning to the neural network for conditional generation
+
+This enables training a single model that can generate diverse outputs
+by varying the conditioning at inference time.
+"""
+
 import abc
 from copy import deepcopy
 from typing import Dict, Generic, Optional, TypeVar
@@ -16,29 +40,127 @@ from gflownet.utils.focus_model import TabularFocusModel
 from gflownet.utils.misc import get_worker_device, get_worker_rng
 from gflownet.utils.transforms import thermometer
 
-Tin = TypeVar("Tin")
-Tout = TypeVar("Tout")
+# Type variables for generic conditional transformations
+Tin = TypeVar("Tin")   # Input type (e.g., LogScalar for log-rewards)
+Tout = TypeVar("Tout") # Output type (e.g., LogScalar for transformed log-rewards)
 
 
 class Conditional(abc.ABC, Generic[Tin, Tout]):
+    """
+    Abstract base class for all conditional generation mechanisms.
+    
+    This class defines the interface that all conditioning strategies must implement.
+    Conditioning allows control over the generation process by transforming rewards
+    based on auxiliary information like temperature or preferences.
+    
+    The generic type parameters Tin and Tout specify the input and output types
+    for the transformation (e.g., both LogScalar for log-reward transformations).
+    """
+    
     def sample(self, n):
+        """
+        Sample conditioning information for n objects.
+        
+        Parameters
+        ----------
+        n : int
+            Number of conditioning samples to generate
+            
+        Returns
+        -------
+        Dict[str, Tensor]
+            Dictionary containing sampled conditioning information
+        """
         raise NotImplementedError()
 
     @abc.abstractmethod
     def transform(self, cond_info: Dict[str, Tensor], data: Tin) -> Tout:
+        """
+        Transform data based on conditioning information.
+        
+        This is the core method that applies the conditioning to transform
+        input data (typically raw rewards) into conditioned outputs.
+        
+        Parameters
+        ----------
+        cond_info : Dict[str, Tensor]
+            Dictionary containing conditioning information (temperature, preferences, etc.)
+        data : Tin
+            Input data to be transformed (e.g., raw log-rewards)
+            
+        Returns
+        -------
+        Tout
+            Transformed data (e.g., temperature-scaled log-rewards)
+        """
         raise NotImplementedError()
 
     def encoding_size(self):
+        """
+        Get the size of the encoded conditioning representation.
+        
+        Returns
+        -------
+        int
+            Dimensionality of the encoded conditioning vector
+        """
         raise NotImplementedError()
 
     def encode(self, conditional: Tensor) -> Tensor:
+        """
+        Encode conditioning information into a tensor representation.
+        
+        This method converts human-interpretable conditioning parameters
+        into a tensor format suitable for neural network input.
+        
+        Parameters
+        ----------
+        conditional : Tensor
+            Conditioning parameters in their raw form
+            
+        Returns
+        -------
+        Tensor
+            Encoded conditioning representation for the neural network
+        """
         raise NotImplementedError()
 
 
 class TemperatureConditional(Conditional[LogScalar, LogScalar]):
+    """
+    Temperature-based conditional generation for exploration control.
+    
+    This class implements temperature conditioning, which controls the exploration
+    vs exploitation trade-off in generation. Higher temperatures encourage more
+    diverse (exploratory) generation, while lower temperatures focus on high-reward
+    regions (exploitation).
+    
+    The temperature transforms log-rewards as: log_reward_scaled = log_reward / temperature
+    This affects the sampling probabilities: higher temperature flattens the distribution,
+    lower temperature sharpens it around high-reward states.
+    
+    Supports various sampling distributions for temperature values:
+    - constant: Fixed temperature value
+    - uniform: Uniform distribution over a temperature range
+    - gamma: Gamma distribution for temperature sampling
+    - loguniform: Log-uniform distribution
+    - beta: Beta distribution scaled to temperature range
+    """
+    
     def __init__(self, cfg: Config):
+        """
+        Initialize temperature conditional with configuration.
+        
+        Parameters
+        ----------
+        cfg : Config
+            Configuration object containing temperature distribution parameters
+        """
         self.cfg = cfg
         tmp_cfg = self.cfg.cond.temperature
+        
+        # Set upper bound for temperature based on distribution type
+        # This helps with numerical stability and reasonable temperature ranges
         self.upper_bound = 1024
         if tmp_cfg.sample_dist == "gamma":
             loc, scale = tmp_cfg.dist_params
