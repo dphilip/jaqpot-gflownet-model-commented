@@ -1,3 +1,35 @@
+"""
+Synthetic Accessibility (SA) Score calculation for molecules.
+
+This module implements the Synthetic Accessibility Score as described in:
+"Estimation of Synthetic Accessibility Score of Drug-like Molecules based on
+Molecular Complexity and Fragment Contributions"
+by Peter Ertl and Ansgar Schuffenhauer
+Journal of Cheminformatics 1:8 (2009)
+http://www.jcheminf.com/content/1/1/8
+
+The SA Score estimates how difficult it would be to synthesize a given molecule,
+with values ranging from 1 (easy to synthesize) to 10 (very difficult to synthesize).
+This is a crucial metric in drug discovery as it helps prioritize molecules that
+can actually be made in the laboratory.
+
+Key features:
+- Fragment-based scoring using pre-computed fragment frequencies
+- Macrocyclic penalty for complex ring systems
+- Molecular symmetry considerations (fingerprint density)
+- High correlation (r² = 0.97) with the original PipelinePilot implementation
+
+The score combines:
+1. Fragment contributions based on how common molecular fragments are
+2. Complexity penalties for unusual structural features
+3. Stereochemistry and ring strain considerations
+
+This implementation includes several small modifications to the original paper,
+particularly in the macrocyclic penalty formula and molecular symmetry handling.
+
+Original implementation by Peter Ertl & Greg Landrum, September 2013.
+"""
+
 #
 # calculation of synthetic accessibility score as described in:
 #
@@ -24,6 +56,7 @@ import pickle  # nosec
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 
+# Global variable to cache fragment scores for efficiency
 _fscores = None
 
 

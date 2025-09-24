@@ -1,3 +1,26 @@
+"""
+Toy sequence generation task for GFlowNet testing and development.
+
+This module implements a simple sequence generation task that serves as a lightweight
+test case for GFlowNet algorithms. The task generates sequences of characters and
+rewards them based on the occurrence count of specific target patterns.
+
+Key features:
+- Simple character-based sequence generation
+- Reward based on pattern matching with target sequences
+- Temperature-based conditional generation
+- Useful for algorithm development and debugging
+
+The task is designed to be:
+1. Fast to run for quick iteration during development
+2. Easy to understand and interpret results
+3. Suitable for testing new algorithms and model architectures
+4. Providing clear signal for learning (pattern-based rewards)
+
+This makes it ideal for validating that GFlowNet implementations are working
+correctly before moving to more complex tasks like molecular generation.
+"""
+
 import socket
 from typing import Dict, List, Tuple
 
@@ -14,27 +37,110 @@ from gflownet.utils.transforms import to_logreward
 
 
 class ToySeqTask(GFNTask):
-    """Sets up a task where the reward is the number of times some sequences appear in the input. Normalized to be
-    in [0,1]"""
+    """
+    Simple sequence generation task with pattern-based rewards.
+    
+    This task generates sequences of characters and rewards them based on how many
+    times they contain specific target patterns. The reward is normalized to [0,1]
+    based on sequence length and pattern frequency.
+    
+    The task is useful for:
+    - Testing GFlowNet algorithms on a simple, interpretable problem
+    - Debugging sequence generation environments and models
+    - Rapid prototyping of new conditioning strategies
+    - Educational purposes to understand GFlowNet behavior
+    
+    Attributes:
+        seqs (List[str]): Target sequences/patterns to search for in generated sequences
+        temperature_conditional (TemperatureConditional): Temperature-based conditioning
+        num_cond_dim (int): Dimensionality of conditioning encoding
+        norm (float): Normalization factor for rewards based on sequence lengths
+    """
 
     def __init__(
         self,
         seqs: List[str],
         cfg: Config,
     ) -> None:
+        """
+        Initialize the toy sequence task.
+        
+        Parameters
+        ----------
+        seqs : List[str]
+            List of target sequences/patterns to reward in generated sequences
+            Generated sequences get higher rewards for containing these patterns
+        cfg : Config
+            Configuration object containing task and conditioning parameters
+        """
         self.seqs = seqs
         self.temperature_conditional = TemperatureConditional(cfg)
         self.num_cond_dim = self.temperature_conditional.encoding_size()
+        # Normalize rewards based on max sequence length and shortest target pattern
         self.norm = cfg.algo.max_len / min(map(len, seqs))
 
     def sample_conditional_information(self, n: int, train_it: int) -> Dict[str, Tensor]:
+        """
+        Sample temperature conditioning information for sequence generation.
+        
+        Parameters
+        ----------
+        n : int
+            Number of conditioning samples to generate
+        train_it : int
+            Current training iteration (unused in this simple task)
+            
+        Returns
+        -------
+        Dict[str, Tensor]
+            Dictionary containing temperature conditioning information
+        """
         return self.temperature_conditional.sample(n)
 
     def cond_info_to_logreward(self, cond_info: Dict[str, Tensor], obj_props: ObjectProperties) -> LogScalar:
+        """
+        Convert object properties and conditioning info into log-rewards.
+        
+        Applies temperature scaling to the raw pattern-matching rewards to control
+        exploration vs exploitation during training.
+        
+        Parameters
+        ----------
+        cond_info : Dict[str, Tensor]
+            Dictionary containing temperature conditioning information
+        obj_props : ObjectProperties
+            Raw reward values based on pattern matching
+            
+        Returns
+        -------
+        LogScalar
+            Temperature-scaled log-rewards for training
+        """
         return LogScalar(self.temperature_conditional.transform(cond_info, to_logreward(obj_props)))
 
     def compute_obj_properties(self, objs: List[str]) -> Tuple[ObjectProperties, Tensor]:
+        """
+        Compute pattern-matching rewards for generated sequences.
+        
+        For each generated sequence, counts how many times any of the target
+        patterns appear in it. The counts are normalized by the normalization
+        factor to keep rewards in a reasonable range.
+        
+        Parameters
+        ----------
+        objs : List[str]
+            List of generated sequences to evaluate
+            
+        Returns
+        -------
+        ObjectProperties
+            2D tensor of rewards (one per sequence) based on pattern matching
+        Tensor
+            Boolean tensor indicating validity (all sequences are valid in this task)
+        """
+        # Count occurrences of all target patterns in each generated sequence
         rs = torch.tensor([sum([s.count(p) for p in self.seqs]) for s in objs]).float() / self.norm
+        # Return rewards as 2D tensor and mark all sequences as valid
         return ObjectProperties(rs[:, None]), torch.ones(len(objs), dtype=torch.bool)
 
 

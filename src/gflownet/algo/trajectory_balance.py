@@ -1,3 +1,27 @@
+"""
+Trajectory Balance (TB) algorithm for training GFlowNets.
+
+This module implements the Trajectory Balance algorithm, which is the main training
+method for Generative Flow Networks (GFlowNets). The algorithm works by enforcing
+flow consistency across complete trajectories from root to terminal states.
+
+Key concepts:
+- Forward Policy P_F(s'|s): Probability of transitioning from state s to s'
+- Backward Policy P_B(s|s'): Probability of transitioning from state s' to s  
+- Flow F(s): Total flow through state s
+- Reward R(x): Reward for terminal state x
+
+The trajectory balance condition states that for any trajectory τ = (s_0 → s_1 → ... → s_T):
+Z * P_F(s_1|s_0) * P_F(s_2|s_1) * ... * P_F(s_T|s_{T-1}) = R(s_T) * P_B(s_{T-1}|s_T) * ... * P_B(s_0|s_1)
+
+This module also implements Sub-Trajectory Balance (SubTB), which enforces consistency
+on sub-trajectories within complete trajectories for improved learning efficiency.
+
+References:
+- Bengio et al., "Flow Network based Generative Models for Non-Iterative Diverse Candidate Generation"
+- Malkin et al., "Trajectory Balance: Improved Credit Assignment in GFlowNets"
+"""
+
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,7 +51,24 @@ from gflownet.utils.misc import get_worker_device
 
 
 def shift_right(x: torch.Tensor, z=0):
-    "Shift x right by 1, and put z in the first position"
+    """
+    Shift tensor elements to the right by one position, filling the first position with z.
+    
+    This utility function is used in the SubTB calculation to handle the cumulative
+    sum operations correctly. It essentially prepends a value to the tensor.
+    
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor to shift
+    z : scalar, default=0
+        Value to place in the first position after shifting
+        
+    Returns
+    -------
+    torch.Tensor
+        Shifted tensor with x[0] = z, x[1] = original_x[0], etc.
+    """
     x = torch.roll(x, 1, dims=0)
     x[0] = z
     return x
@@ -35,11 +76,33 @@ def shift_right(x: torch.Tensor, z=0):
 
 def cross(x: torch.Tensor):
     """
-    Calculate $y_{ij} = \sum_{t=i}^j x_t$.
-    The lower triangular portion is the inverse of the upper triangular one.
+    Calculate cumulative sum matrix for Sub-Trajectory Balance.
+    
+    Computes a matrix y where y[i,j] = sum_{t=i}^{j} x_t for all valid i,j pairs.
+    This is used in SubTB to efficiently compute sub-trajectory sums.
+    
+    The function creates a matrix where:
+    - Upper triangular: y[i,j] = sum of x from index i to j (i <= j)
+    - Lower triangular: Symmetric to upper triangular
+    
+    Parameters
+    ----------
+    x : torch.Tensor
+        1D tensor of values to compute cumulative sums over
+        
+    Returns
+    -------
+    torch.Tensor
+        2D tensor of cumulative sums with shape (len(x), len(x))
+        
+    Notes
+    -----
+    This operation is key to the SubTB algorithm efficiency, allowing
+    vectorized computation of all possible sub-trajectory sums.
     """
     assert x.ndim == 1
-    y = torch.cumsum(x, 0)
+    y = torch.cumsum(x, 0)  # Cumulative sum: [x_0, x_0+x_1, x_0+x_1+x_2, ...]
+    # Broadcast subtraction to get all interval sums
     return y[None] - shift_right(y)[:, None]
 
 
